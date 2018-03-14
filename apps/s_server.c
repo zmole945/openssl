@@ -208,14 +208,10 @@ static int psk_find_session_cb(SSL *ssl, const unsigned char *identity,
         return 0;
     }
 
-    if (key_len == EVP_MD_size(EVP_sha256()))
-        cipher = SSL_CIPHER_find(ssl, tls13_aes128gcmsha256_id);
-    else if (key_len == EVP_MD_size(EVP_sha384()))
-        cipher = SSL_CIPHER_find(ssl, tls13_aes256gcmsha384_id);
-
+    /* We default to SHA256 */
+    cipher = SSL_CIPHER_find(ssl, tls13_aes128gcmsha256_id);
     if (cipher == NULL) {
-        /* Doesn't look like a suitable TLSv1.3 key. Ignore it */
-        OPENSSL_free(key);
+        BIO_printf(bio_err, "Error finding suitable ciphersuite\n");
         return 0;
     }
 
@@ -2041,6 +2037,10 @@ int s_server_main(int argc, char *argv[])
     /* Set DTLS cookie generation and verification callbacks */
     SSL_CTX_set_cookie_generate_cb(ctx, generate_cookie_callback);
     SSL_CTX_set_cookie_verify_cb(ctx, verify_cookie_callback);
+
+    /* Set TLS1.3 cookie generation and verification callbacks */
+    SSL_CTX_set_stateless_cookie_generate_cb(ctx, generate_stateless_cookie_callback);
+    SSL_CTX_set_stateless_cookie_verify_cb(ctx, verify_stateless_cookie_callback);
 
     if (ctx2 != NULL) {
         SSL_CTX_set_verify(ctx2, s_server_verify, verify_callback);

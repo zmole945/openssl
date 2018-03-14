@@ -3258,6 +3258,12 @@ void ssl_set_masks(SSL *s)
             && pvalid[SSL_PKEY_ED25519] & CERT_PKEY_EXPLICIT_SIGN
             && TLS1_get_version(s) == TLS1_2_VERSION)
             mask_a |= SSL_aECDSA;
+
+    /* Allow Ed448 for TLS 1.2 if peer supports it */
+    if (!(mask_a & SSL_aECDSA) && ssl_has_cert(s, SSL_PKEY_ED448)
+            && pvalid[SSL_PKEY_ED448] & CERT_PKEY_EXPLICIT_SIGN
+            && TLS1_get_version(s) == TLS1_2_VERSION)
+            mask_a |= SSL_aECDSA;
 #endif
 
 #ifndef OPENSSL_NO_EC
@@ -5346,7 +5352,10 @@ int SSL_stateless(SSL *s)
     if (ret > 0 && s->ext.cookieok)
         return 1;
 
-    return 0;
+    if (s->hello_retry_request == SSL_HRR_PENDING && !ossl_statem_in_error(s))
+        return 0;
+
+    return -1;
 }
 
 void SSL_force_post_handshake_auth(SSL *ssl)
@@ -5398,5 +5407,16 @@ int SSL_verify_client_post_handshake(SSL *ssl)
     }
 
     ossl_statem_set_in_init(ssl, 1);
+    return 1;
+}
+
+int SSL_CTX_set_session_ticket_cb(SSL_CTX *ctx,
+                                  SSL_CTX_generate_session_ticket_fn gen_cb,
+                                  SSL_CTX_decrypt_session_ticket_fn dec_cb,
+                                  void *arg)
+{
+    ctx->generate_ticket_cb = gen_cb;
+    ctx->decrypt_ticket_cb = dec_cb;
+    ctx->ticket_cb_data = arg;
     return 1;
 }

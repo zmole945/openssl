@@ -35,6 +35,7 @@ INCLUDE_MAIN___test_libtestutil_OLB = /INCLUDE=MAIN
           bftest ssltest_old dsatest exptest rsa_test \
           evp_test evp_extra_test igetest v3nametest v3ext \
           crltest danetest bad_dtls_test lhash_test \
+          conf_include_test \
           constant_time_test verify_extra_test clienthellotest \
           packettest asynctest secmemtest srptest memleaktest stack_test \
           dtlsv1listentest ct_test threadstest afalgtest d2i_test \
@@ -390,6 +391,10 @@ INCLUDE_MAIN___test_libtestutil_OLB = /INCLUDE=MAIN
   INCLUDE[time_offset_test]=../include
   DEPEND[time_offset_test]=../libcrypto libtestutil.a
 
+  SOURCE[conf_include_test]=conf_include_test.c
+  INCLUDE[conf_include_test]=../include
+  DEPEND[conf_include_test]=../libcrypto libtestutil.a
+
   # Internal test programs.  These are essentially a collection of internal
   # test routines.  Some of them need to reach internal symbols that aren't
   # available through the shared library (at least on Linux, Solaris, Windows
@@ -400,7 +405,8 @@ INCLUDE_MAIN___test_libtestutil_OLB = /INCLUDE=MAIN
   # names with the DLL import libraries.
   IF[{- $disabled{shared} || $target{build_scheme}->[1] ne 'windows' -}]
     PROGRAMS_NO_INST=asn1_internal_test modes_internal_test x509_internal_test \
-                     tls13encryptiontest wpackettest ctype_internal_test
+                     tls13encryptiontest wpackettest ctype_internal_test \
+                     rdrand_sanitytest
     IF[{- !$disabled{poly1305} -}]
       PROGRAMS_NO_INST=poly1305_internal_test
     ENDIF
@@ -460,6 +466,10 @@ INCLUDE_MAIN___test_libtestutil_OLB = /INCLUDE=MAIN
     SOURCE[curve448_internal_test]=curve448_internal_test.c
     INCLUDE[curve448_internal_test]=.. ../include ../crypto/ec/curve448
     DEPEND[curve448_internal_test]=../libcrypto.a libtestutil.a
+
+    SOURCE[rdrand_sanitytest]=rdrand_sanitytest.c
+    INCLUDE[rdrand_sanitytest]=../include
+    DEPEND[rdrand_sanitytest]=../libcrypto.a libtestutil.a
   ENDIF
 
   IF[{- !$disabled{mdc2} -}]
