@@ -15,7 +15,7 @@
 # include <openssl/sha.h>
 # include <openssl/hmac.h>
 # include <openssl/ec.h>
-# include "internal/rand.h"
+# include <openssl/rand_drbg.h>
 
 /* How many times to read the TSC as a randomness source. */
 # define TSC_READ_COUNT                 4
@@ -94,13 +94,12 @@ typedef struct rand_drbg_method_st {
  * The state of a DRBG AES-CTR.
  */
 typedef struct rand_drbg_ctr_st {
-    AES_KEY ks;
+    EVP_CIPHER_CTX *ctx;
+    EVP_CIPHER_CTX *ctx_df;
+    const EVP_CIPHER *cipher;
     size_t keylen;
     unsigned char K[32];
     unsigned char V[16];
-    /* Temp variables used by derivation function */
-    AES_KEY df_ks;
-    AES_KEY df_kxks;
     /* Temporary block storage used by ctr_df */
     unsigned char bltmp[16];
     size_t bltmp_pos;
@@ -116,7 +115,7 @@ struct rand_drbg_st {
     CRYPTO_RWLOCK *lock;
     RAND_DRBG *parent;
     int secure; /* 1: allocated on the secure heap, 0: otherwise */
-    int nid; /* the underlying algorithm */
+    int type; /* the nid of the underlying algorithm */
     int fork_count;
     unsigned short flags; /* various external flags */
 
@@ -128,7 +127,7 @@ struct rand_drbg_st {
      * with respect to how randomness is added to the RNG during reseeding
      * (see PR #4328).
      */
-    RAND_POOL *pool;
+    struct rand_pool_st *pool;
 
     /*
      * The following parameters are setup by the per-type "init" function.
@@ -205,18 +204,6 @@ extern RAND_METHOD rand_meth;
 
 /* How often we've forked (only incremented in child). */
 extern int rand_fork_count;
-
-/* Hardware-based seeding functions. */
-size_t rand_acquire_entropy_from_tsc(RAND_POOL *pool);
-size_t rand_acquire_entropy_from_cpu(RAND_POOL *pool);
-
-/* DRBG entropy callbacks. */
-size_t rand_drbg_get_entropy(RAND_DRBG *drbg,
-                             unsigned char **pout,
-                             int entropy, size_t min_len, size_t max_len);
-void rand_drbg_cleanup_entropy(RAND_DRBG *drbg,
-                               unsigned char *out, size_t outlen);
-size_t rand_drbg_get_additional_data(unsigned char **pout, size_t max_len);
 
 /* DRBG helpers */
 int rand_drbg_restart(RAND_DRBG *drbg,
