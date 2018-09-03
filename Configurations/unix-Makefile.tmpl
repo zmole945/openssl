@@ -16,6 +16,10 @@
 
      sub windowsdll { $config{target} =~ /^(?:Cygwin|mingw)/ }
 
+     # Shared AIX support is special. We put libcrypto[64].so.ver into
+     # libcrypto.a and use libcrypto_a.a as static one.
+     sub sharedaix  { !$disabled{shared} && $config{target} =~ /^aix/ }
+
      our $sover_dirname = $config{shlib_version_number};
      $sover_dirname =~ s|\.|_|g
          if $config{target} =~ /^mingw/;
@@ -106,12 +110,9 @@ DEPS={- join(" ", map { (my $x = $_) =~ s|\.o$|$depext|; $x; }
                   grep { $unified_info{sources}->{$_}->[0] =~ /\.c$/ }
                   keys %{$unified_info{sources}}); -}
 {- output_on() if $disabled{makedepend}; "" -}
-GENERATED_MANDATORY={- join(" ", @{$unified_info{depends}->{""}} ) -}
-GENERATED={- join(" ",
-                  ( grep { defined $unified_info{generate}->{$_} }
-                    map { @{$unified_info{sources}->{$_}} }
-                    grep { /\.o$/ } keys %{$unified_info{sources}} ),
-                  ( grep { /\.h$/ } keys %{$unified_info{generate}} )) -}
+GENERATED_MANDATORY={- join(" ", @{$unified_info{depends}->{""}}) -}
+GENERATED={- # common0.tmpl provides @generated
+             join(" ", @generated ) -}
 
 INSTALL_LIBS={- join(" ", map { lib($_) } @{$unified_info{install}->{libraries}}) -}
 INSTALL_SHLIBS={- join(" ", map { shlib($_) } @{$unified_info{install}->{libraries}}) -}
@@ -120,7 +121,7 @@ INSTALL_ENGINES={- join(" ", map { dso($_) } @{$unified_info{install}->{engines}
 INSTALL_PROGRAMS={- join(" ", map { $_.$exeext } @{$unified_info{install}->{programs}}) -}
 {- output_off() if $disabled{apps}; "" -}
 BIN_SCRIPTS=$(BLDDIR)/tools/c_rehash
-MISC_SCRIPTS=$(BLDDIR)/apps/CA.pl $(BLDDIR)/apps/tsget
+MISC_SCRIPTS=$(BLDDIR)/apps/CA.pl $(BLDDIR)/apps/tsget.pl:tsget
 {- output_on() if $disabled{apps}; "" -}
 
 APPS_OPENSSL={- use File::Spec::Functions;
@@ -211,7 +212,7 @@ EX_LIBS= {- join(' ', @{$config{LDLIBS}}) -}
 
 MAKEDEPEND={- $config{makedepprog} -}
 
-PERL={- $config{perl} -}
+PERL={- $config{PERL} -}
 
 AR=$(CROSS_COMPILE){- $config{AR} -}
 ARFLAGS= {- join(' ', @{$config{ARFLAGS}}) -}
@@ -356,6 +357,11 @@ build_apps build_tests: build_programs
 # Convenience target to prebuild all generated files, not just the mandatory
 # ones
 build_all_generated: $(GENERATED_MANDATORY) $(GENERATED)
+	@ : {- output_off() if $disabled{makedepend}; "" -}
+	@echo "Warning: consider configuring with no-makedepend, because if"
+	@echo "         target system doesn't have $(PERL),"
+	@echo "         then make will fail..."
+	@ : {- output_on() if $disabled{makedepend}; "" -}
 
 test: tests
 {- dependmagic('tests'); -}: build_programs_nodep build_engines_nodep link-utils
@@ -367,7 +373,7 @@ test: tests
 	  RESULT_D=test-runs \
 	  PERL="$(PERL)" \
 	  EXE_EXT={- $exeext -} \
-	  OPENSSL_ENGINES=`cd ../$(BLDDIR)/engines; pwd` \
+	  OPENSSL_ENGINES=`cd ../$(BLDDIR)/engines 2>/dev/null && pwd` \
 	  OPENSSL_DEBUG_MEMORY=on \
 	    $(PERL) ../$(SRCDIR)/test/run_tests.pl $(TESTS) )
 	@ : {- if ($disabled{tests}) { output_on(); } else { output_off(); } "" -}
@@ -388,9 +394,13 @@ uninstall: uninstall_docs uninstall_sw
 
 libclean:
 	@set -e; for s in $(SHLIB_INFO); do \
+		if [ "$$s" = ";" ]; then continue; fi; \
 		s1=`echo "$$s" | cut -f1 -d";"`; \
 		s2=`echo "$$s" | cut -f2 -d";"`; \
-		$(ECHO) $(RM) $$s1; \
+		$(ECHO) $(RM) $$s1; {- output_off() unless windowsdll(); "" -}\
+		$(RM) apps/$$s1; \
+		$(RM) test/$$s1; \
+		$(RM) fuzz/$$s1; {- output_on() unless windowsdll(); "" -}\
 		$(RM) $$s1; \
 		if [ "$$s1" != "$$s2" ]; then \
 			$(ECHO) $(RM) $$s2; \
@@ -402,14 +412,14 @@ libclean:
 
 clean: libclean
 	$(RM) $(PROGRAMS) $(TESTPROGS) $(ENGINES) $(SCRIPTS)
-	$(RM) $(GENERATED)
-	-$(RM) `find . -name '*{- $depext -}' -a \! -path "./.git/*"`
-	-$(RM) `find . -name '*{- $objext -}' -a \! -path "./.git/*"`
+	$(RM) $(GENERATED_MANDATORY) $(GENERATED)
+	-$(RM) `find . -name .git -prune -o -name '*{- $depext -}' -print`
+	-$(RM) `find . -name .git -prune -o -name '*{- $objext -}' -print`
 	$(RM) core
 	$(RM) tags TAGS doc-nits
 	$(RM) -r test/test-runs
 	$(RM) openssl.pc libcrypto.pc libssl.pc
-	-$(RM) `find . -type l -a \! -path "./.git/*"`
+	-$(RM) `find . -name .git -prune -o -type l -print`
 	$(RM) $(TARFILE)
 
 distclean: clean
@@ -442,12 +452,25 @@ install_ssldirs:
 	@$(PERL) $(SRCDIR)/util/mkdir-p.pl $(DESTDIR)$(OPENSSLDIR)/misc
 	@set -e; for x in dummy $(MISC_SCRIPTS); do \
 		if [ "$$x" = "dummy" ]; then continue; fi; \
-		fn=`basename $$x`; \
-		$(ECHO) "install $$x -> $(DESTDIR)$(OPENSSLDIR)/misc/$$fn"; \
-		cp $$x $(DESTDIR)$(OPENSSLDIR)/misc/$$fn.new; \
+		x1=`echo "$$x" | cut -f1 -d:`; \
+		x2=`echo "$$x" | cut -f2 -d:`; \
+		fn=`basename $$x1`; \
+		$(ECHO) "install $$x1 -> $(DESTDIR)$(OPENSSLDIR)/misc/$$fn"; \
+		cp $$x1 $(DESTDIR)$(OPENSSLDIR)/misc/$$fn.new; \
 		chmod 755 $(DESTDIR)$(OPENSSLDIR)/misc/$$fn.new; \
 		mv -f $(DESTDIR)$(OPENSSLDIR)/misc/$$fn.new \
 		      $(DESTDIR)$(OPENSSLDIR)/misc/$$fn; \
+		if [ "$$x1" != "$$x2" ]; then \
+			ln=`basename "$$x2"`; \
+			: {- output_off() unless windowsdll(); "" -}; \
+			$(ECHO) "copy $(DESTDIR)$(OPENSSLDIR)/misc/$$ln -> $(DESTDIR)$(OPENSSLDIR)/misc/$$fn"; \
+			cp $(DESTDIR)$(OPENSSLDIR)/misc/$$fn $(DESTDIR)$(OPENSSLDIR)/misc/$$ln; \
+			: {- output_on() unless windowsdll();
+			     output_off() if windowsdll(); "" -}; \
+			$(ECHO) "link $(DESTDIR)$(OPENSSLDIR)/misc/$$ln -> $(DESTDIR)$(OPENSSLDIR)/misc/$$fn"; \
+			ln -sf $$fn $(DESTDIR)$(OPENSSLDIR)/misc/$$ln; \
+			: {- output_on() if windowsdll(); "" -}; \
+		fi; \
 	done
 	@$(ECHO) "install $(SRCDIR)/apps/openssl.cnf -> $(DESTDIR)$(OPENSSLDIR)/openssl.cnf.dist"
 	@cp $(SRCDIR)/apps/openssl.cnf $(DESTDIR)$(OPENSSLDIR)/openssl.cnf.new
@@ -500,7 +523,7 @@ install_dev:
 		s2=`echo "$$s" | cut -f2 -d";"`; \
 		fn1=`basename $$s1`; \
 		fn2=`basename $$s2`; \
-		: {- output_off() if windowsdll(); "" -}; \
+		: {- output_off(); output_on() unless windowsdll() or sharedaix(); "" -}; \
 		$(ECHO) "install $$s1 -> $(DESTDIR)$(libdir)/$$fn1"; \
 		cp $$s1 $(DESTDIR)$(libdir)/$$fn1.new; \
 		chmod 755 $(DESTDIR)$(libdir)/$$fn1.new; \
@@ -510,13 +533,28 @@ install_dev:
 			$(ECHO) "link $(DESTDIR)$(libdir)/$$fn2 -> $(DESTDIR)$(libdir)/$$fn1"; \
 			ln -sf $$fn1 $(DESTDIR)$(libdir)/$$fn2; \
 		fi; \
-		: {- output_on() if windowsdll(); "" -}{- output_off() unless windowsdll(); "" -}; \
+		: {- output_off() unless windowsdll() or sharedaix(); output_on() if windowsdll(); "" -}; \
 		$(ECHO) "install $$s2 -> $(DESTDIR)$(libdir)/$$fn2"; \
 		cp $$s2 $(DESTDIR)$(libdir)/$$fn2.new; \
 		chmod 755 $(DESTDIR)$(libdir)/$$fn2.new; \
 		mv -f $(DESTDIR)$(libdir)/$$fn2.new \
 		      $(DESTDIR)$(libdir)/$$fn2; \
-		: {- output_on() unless windowsdll(); "" -}; \
+		: {- output_off() if windowsdll(); output_on() if sharedaix(); "" -}; \
+		a=$(DESTDIR)$(libdir)/$$fn2; \
+		$(ECHO) "install $$s1 -> $$a"; \
+		if [ -f $$a ]; then ( trap "rm -rf /tmp/ar.$$$$" INT 0; \
+			mkdir /tmp/ar.$$$$; ( cd /tmp/ar.$$$$; \
+			cp -f $$a $$a.new; \
+			for so in `$(AR) t $$a`; do \
+				$(AR) x $$a $$so; \
+				chmod u+w $$so; \
+				strip -X32_64 -e $$so; \
+				$(AR) r $$a.new $$so; \
+			done; \
+		)); fi; \
+		$(AR) r $$a.new $$s1; \
+		mv -f $$a.new $$a; \
+		: {- output_off() if sharedaix(); output_on(); "" -}; \
 	done
 	@ : {- output_on() if $disabled{shared}; "" -}
 	@$(PERL) $(SRCDIR)/util/mkdir-p.pl $(DESTDIR)$(libdir)/pkgconfig
@@ -556,11 +594,11 @@ uninstall_dev:
 		fn1=`basename $$s1`; \
 		fn2=`basename $$s2`; \
 		: {- output_off() if windowsdll(); "" -}; \
-		$(ECHO) "$(RM) $(DESTDIR)$(libdir)/$$fn1"; \
-		$(RM) $(DESTDIR)$(libdir)/$$fn1; \
-		if [ "$$fn1" != "$$fn2" ]; then \
-			$(ECHO) "$(RM) $(DESTDIR)$(libdir)/$$fn2"; \
-			$(RM) $(DESTDIR)$(libdir)/$$fn2; \
+		$(ECHO) "$(RM) $(DESTDIR)$(libdir)/$$fn2"; \
+		$(RM) $(DESTDIR)$(libdir)/$$fn2; \
+		if [ "$$fn1" != "$$fn2" -a -f "$(DESTDIR)$(libdir)/$$fn1" ]; then \
+			$(ECHO) "$(RM) $(DESTDIR)$(libdir)/$$fn1"; \
+			$(RM) $(DESTDIR)$(libdir)/$$fn1; \
 		fi; \
 		: {- output_on() if windowsdll(); "" -}{- output_off() unless windowsdll(); "" -}; \
 		$(ECHO) "$(RM) $(DESTDIR)$(libdir)/$$fn2"; \
@@ -702,9 +740,11 @@ update: generate errors ordinals
 generate: generate_apps generate_crypto_bn generate_crypto_objects \
           generate_crypto_conf generate_crypto_asn1 generate_fuzz_oids
 
+.PHONY: doc-nits
 doc-nits:
 	(cd $(SRCDIR); $(PERL) util/find-doc-nits -n -p ) >doc-nits
-	if [ -s doc-nits ] ; then cat doc-nits; rm doc-nits ; exit 1; fi
+	@if [ -s doc-nits ] ; then cat doc-nits ; exit 1; \
+	else echo 'doc-nits: no errors.'; rm doc-nits ; fi
 
 # Test coverage is a good idea for the future
 #coverage: $(PROGRAMS) $(TESTPROGRAMS)
@@ -754,11 +794,13 @@ generate_fuzz_oids:
 # Set to -force to force a rebuild
 ERROR_REBUILD=
 errors:
-	( cd $(SRCDIR); $(PERL) util/ck_errf.pl -strict */*.c */*/*.c )
-	( b=`pwd`; cd $(SRCDIR); \
+	( b=`pwd`; set -e; cd $(SRCDIR); \
+          $(PERL) util/ck_errf.pl -strict -internal; \
           $(PERL) -I$$b util/mkerr.pl $(ERROR_REBUILD) -internal )
-	( b=`pwd`; cd $(SRCDIR)/engines; \
+	( b=`pwd`; set -e; cd $(SRCDIR)/engines; \
           for E in *.ec ; do \
+              $(PERL) ../util/ck_errf.pl -strict \
+                -conf $$E `basename $$E .ec`.c; \
               $(PERL) -I$$b ../util/mkerr.pl $(ERROR_REBUILD) -static \
                 -conf $$E `basename $$E .ec`.c ; \
           done )
@@ -791,7 +833,7 @@ tar:
 	mkdir -p $$TMPDIR/$$DISTDIR; \
 	(cd $(SRCDIR); \
 	 excl_re=`git submodule status | sed -e 's/^.//' | cut -d' ' -f2`; \
-	 excl_re="^(fuzz/corpora|`echo $$excl_re | sed -e 's/ /$$|/g'`\$$)"; \
+	 excl_re="^(fuzz/corpora|Configurations/.*\.norelease\.conf|`echo $$excl_re | sed -e 's/ /$$|/g'`\$$)"; \
 	 echo "$$excl_re"; \
 	 git ls-tree -r --name-only --full-tree HEAD \
 	 | egrep -v "$$excl_re" \
@@ -954,7 +996,7 @@ EOF
           }
           return <<"EOF";
 $args{src}: $args{generator}->[0] $deps
-	\$(CPP) $incs $cppflags $args{generator}->[0] | \\
+	\$(CC) $incs $cppflags -E $args{generator}->[0] | \\
 	\$(PERL) -ne '/^#(line)?\\s*[0-9]+/ or print' > \$@
 EOF
       }
@@ -977,7 +1019,6 @@ EOF
           $cmd = '$(RC)';
           $cmdflags = '$(RCFLAGS)';
           $cmdcompile = '';
-          $makedepprog = undef;
       } elsif (grep /\.(cc|cpp)$/, @srcs) {
           $cmd = '$(CXX)';
           $cmdcompile = ' -c';
@@ -1003,20 +1044,17 @@ $obj$objext: $deps
 	$cmd $cmdflags -c -o \$\@ $srcs
 EOF
       } elsif (grep /\.S$/, @srcs) {
-          # In case one wonders why not just $(CC) -c file.S. While it
-          # does work with contemporary compilers, there are some legacy
-          # ones that get it wrong. Hence the elaborate scheme... We
-          # don't care to maintain dependecy lists, because dependency
-          # is rather weak, at most one header file that lists constants
-          # which are assigned in ascending order.
+          # Originally there was mutli-step rule with $(CC) -E file.S
+          # followed by $(CC) -c file.s. It compensated for one of
+          # legacy platform compiler's inability to handle .S files.
+          # The platform is long discontinued by vendor so there is
+          # hardly a point to drag it along...
           $recipe .= <<"EOF";
 $obj$objext: $deps
-	( trap "rm -f \$@.*" INT 0; \\
-	  \$(CPP) $incs $cmdflags $srcs | \\
-	  \$(PERL) -ne '/^#(line)?\\s*[0-9]+/ or print' > \$@.s && \\
-	  $cmd $cmdflags -c -o \$\@ \$@.s )
+	$cmd $incs $cmdflags -c -o \$\@ $srcs
 EOF
-      } elsif (defined $makedepprog && $makedepprog !~ /\/makedepend/) {
+      } elsif (defined $makedepprog && $makedepprog !~ /\/makedepend/
+               && !grep /\.rc$/, @srcs) {
           $recipe .= <<"EOF";
 $obj$objext: $deps
 	$cmd $incs $cmdflags -MMD -MF $obj$depext.tmp -MT \$\@ -c -o \$\@ $srcs
@@ -1060,10 +1098,10 @@ EOF
       my $linklibs = join("", map { my $f = basename($_);
                                     (my $l = $f) =~ s/^lib//;
                                     " -l$l" } @{$args{deps}});
-      my @objs = map { (my $x = $_) =~ s|\.o$|$objext|; $x }
-                 grep { $_ =~ m|\.o$| }
+      my @objs = map { (my $x = $_) =~ s|\.o$||; "$x$objext" }
+                 grep { $_ !~ m/\.(?:def|map)$/ }
                  @{$args{objs}};
-      my @defs = grep { $_ =~ /\.(def|map)$/ } @{$args{objs}};
+      my @defs = grep { $_ =~ /\.(?:def|map)$/ } @{$args{objs}};
       my @deps = compute_lib_depends(@{$args{deps}});
       die "More than one exported symbol map" if scalar @defs > 1;
       my $objs = join(" ", @objs);
@@ -1099,6 +1137,11 @@ EOF
 	cp -p $shlib'\$(SHLIB_EXT)' test/
 	cp -p $shlib'\$(SHLIB_EXT)' fuzz/
 EOF
+      } elsif (sharedaix()) {
+          $recipe .= <<"EOF";
+	rm -f $target && \\
+	\$(AR) r $target $target_full
+EOF
       } else {
           $recipe .= <<"EOF";
 	if [ '$target' != '$target_full' ]; then \\
@@ -1122,7 +1165,9 @@ EOF
       my $linklibs = join("", map { my $f = basename($_);
                                     (my $l = $f) =~ s/^lib//;
                                     " -l$l" } @{$args{deps}});
-      my @objs = map { (my $x = $_) =~ s|\.o$|$objext|; $x } @{$args{objs}};
+      my @objs = map { (my $x = $_) =~ s|\.o$||; "$x$objext" }
+                 grep { $_ !~ m/\.(?:def|map)$/ }
+                 @{$args{objs}};
       my @deps = compute_lib_depends(@{$args{deps}});
       my $objs = join(" ", @objs);
       my $deps = join(" ", @deps);
@@ -1150,7 +1195,7 @@ EOF
       my $bin = $args{bin};
       my $bind = dirname($bin);
       my $binn = basename($bin);
-      my $objs = join(" ", map { (my $x = $_) =~ s|\.o$|$objext|; $x }
+      my $objs = join(" ", map { (my $x = $_) =~ s|\.o$||; "$x$objext" }
                            @{$args{objs}});
       my $deps = join(" ",compute_lib_depends(@{$args{deps}}));
       my @linkdirs = ();
@@ -1160,8 +1205,8 @@ EOF
           push @linkdirs, $d unless grep { $d eq $_ } @linkdirs;
       }
       my $linkflags = join("", map { "-L$_ " } @linkdirs);
-      my $linklibs = join("", map { if ($_ =~ /\.a$/) {
-                                        " $_";
+      my $linklibs = join("", map { if ($_ =~ s/\.a$//) {
+                                        " $_$libext";
                                     } else {
                                         my $f = basename($_);
                                         (my $l = $f) =~ s/^lib//;

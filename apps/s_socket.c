@@ -146,7 +146,8 @@ int init_client(int *sock, const char *host, const char *port,
         }
 #endif
 
-        if (!BIO_connect(*sock, BIO_ADDRINFO_address(ai), 0)) {
+        if (!BIO_connect(*sock, BIO_ADDRINFO_address(ai),
+                         protocol == IPPROTO_TCP ? BIO_SOCK_NODELAY : 0)) {
             BIO_closesocket(*sock);
             *sock = INVALID_SOCKET;
             continue;
@@ -204,14 +205,14 @@ out:
  */
 int do_server(int *accept_sock, const char *host, const char *port,
               int family, int type, int protocol, do_server_cb cb,
-              unsigned char *context, int naccept)
+              unsigned char *context, int naccept, BIO *bio_s_out)
 {
     int asock = 0;
     int sock;
     int i;
     BIO_ADDRINFO *res = NULL;
     const BIO_ADDRINFO *next;
-    int sock_family, sock_type, sock_protocol;
+    int sock_family, sock_type, sock_protocol, sock_port;
     const BIO_ADDR *sock_address;
     int sock_options = BIO_SOCK_REUSEADDR;
     int ret = 0;
@@ -280,12 +281,50 @@ int do_server(int *accept_sock, const char *host, const char *port,
     }
 #endif
 
+    sock_port = BIO_ADDR_rawport(sock_address);
+
     BIO_ADDRINFO_free(res);
     res = NULL;
+
+    if (sock_port == 0) {
+        /* dynamically allocated port, report which one */
+        union BIO_sock_info_u info;
+        char *hostname = NULL;
+        char *service = NULL;
+        int success = 0;
+
+        if ((info.addr = BIO_ADDR_new()) != NULL
+            && BIO_sock_info(asock, BIO_SOCK_INFO_ADDRESS, &info)
+            && (hostname = BIO_ADDR_hostname_string(info.addr, 1)) != NULL
+            && (service = BIO_ADDR_service_string(info.addr, 1)) != NULL
+            && BIO_printf(bio_s_out,
+                          strchr(hostname, ':') == NULL
+                          ? /* IPv4 */ "ACCEPT %s:%s\n"
+                          : /* IPv6 */ "ACCEPT [%s]:%s\n",
+                          hostname, service) > 0)
+            success = 1;
+
+        (void)BIO_flush(bio_s_out);
+        OPENSSL_free(hostname);
+        OPENSSL_free(service);
+        BIO_ADDR_free(info.addr);
+        if (!success) {
+            BIO_closesocket(asock);
+            ERR_print_errors(bio_err);
+            goto end;
+        }
+    } else {
+        (void)BIO_printf(bio_s_out, "ACCEPT\n");
+        (void)BIO_flush(bio_s_out);
+    }
 
     if (accept_sock != NULL)
         *accept_sock = asock;
     for (;;) {
+        char sink[64];
+        struct timeval timeout;
+        fd_set readfds;
+
         if (type == SOCK_STREAM) {
             BIO_ADDR_free(ourpeer);
             ourpeer = BIO_ADDR_new();
@@ -302,20 +341,8 @@ int do_server(int *accept_sock, const char *host, const char *port,
                 BIO_closesocket(asock);
                 break;
             }
+            BIO_set_tcp_ndelay(sock, 1);
             i = (*cb)(sock, type, protocol, context);
-
-            /*
-             * Give the socket time to send its last data before we close it.
-             * No amount of setting SO_LINGER etc on the socket seems to
-             * persuade Windows to send the data before closing the socket...
-             * but sleeping for a short time seems to do it (units in ms)
-             * TODO: Find a better way to do this
-             */
-#if defined(OPENSSL_SYS_WINDOWS)
-            Sleep(50);
-#elif defined(OPENSSL_SYS_CYGWIN)
-            usleep(50000);
-#endif
 
             /*
              * If we ended with an alert being sent, but still with data in the
@@ -328,6 +355,20 @@ int do_server(int *accept_sock, const char *host, const char *port,
              * TCP-RST. This seems to allow the peer to read the alert data.
              */
             shutdown(sock, 1); /* SHUT_WR */
+            /*
+             * We just said we have nothing else to say, but it doesn't mean
+             * that the other side has nothing. It's even recommended to
+             * consume incoming data. [In testing context this ensures that
+             * alerts are passed on...]
+             */
+            timeout.tv_sec = 0;
+            timeout.tv_usec = 500000;  /* some extreme round-trip */
+            do {
+                FD_ZERO(&readfds);
+                openssl_fdset(sock, &readfds);
+            } while (select(sock + 1, &readfds, NULL, NULL, &timeout) > 0
+                     && readsocket(sock, sink, sizeof(sink)) > 0);
+
             BIO_closesocket(sock);
         } else {
             i = (*cb)(asock, type, protocol, context);

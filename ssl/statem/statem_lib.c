@@ -19,6 +19,14 @@
 #include <openssl/evp.h>
 #include <openssl/x509.h>
 
+/*
+ * Map error codes to TLS/SSL alart types.
+ */
+typedef struct x509err2alert_st {
+    int x509err;
+    int alert;
+} X509ERR2ALERT;
+
 /* Fixed value used in the ServerHello random field to identify an HRR */
 const unsigned char hrrrandom[] = {
     0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02,
@@ -97,7 +105,7 @@ int tls_setup_handshake(SSL *s)
          * enabled. For clients we do this check during construction of the
          * ClientHello.
          */
-        if (ssl_get_min_max_version(s, &ver_min, &ver_max) != 0) {
+        if (ssl_get_min_max_version(s, &ver_min, &ver_max, NULL) != 0) {
             SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_SETUP_HANDSHAKE,
                      ERR_R_INTERNAL_ERROR);
             return 0;
@@ -124,23 +132,18 @@ int tls_setup_handshake(SSL *s)
         }
         if (SSL_IS_FIRST_HANDSHAKE(s)) {
             /* N.B. s->session_ctx == s->ctx here */
-            CRYPTO_atomic_add(&s->session_ctx->stats.sess_accept, 1, &i,
-                              s->session_ctx->lock);
+            tsan_counter(&s->session_ctx->stats.sess_accept);
         } else {
             /* N.B. s->ctx may not equal s->session_ctx */
-            CRYPTO_atomic_add(&s->ctx->stats.sess_accept_renegotiate, 1, &i,
-                              s->ctx->lock);
+            tsan_counter(&s->ctx->stats.sess_accept_renegotiate);
 
             s->s3->tmp.cert_request = 0;
         }
     } else {
-        int discard;
         if (SSL_IS_FIRST_HANDSHAKE(s))
-            CRYPTO_atomic_add(&s->session_ctx->stats.sess_connect, 1, &discard,
-                              s->session_ctx->lock);
+            tsan_counter(&s->session_ctx->stats.sess_connect);
         else
-            CRYPTO_atomic_add(&s->session_ctx->stats.sess_connect_renegotiate,
-                              1, &discard, s->session_ctx->lock);
+            tsan_counter(&s->session_ctx->stats.sess_connect_renegotiate);
 
         /* mark client_random uninitialized */
         memset(s->s3->client_random, 0, sizeof(s->s3->client_random));
@@ -378,9 +381,6 @@ MSG_PROCESS_RETURN tls_process_cert_verify(SSL *s, PACKET *pkt)
             /* SSLfatal() already called */
             goto err;
         }
-#ifdef SSL_DEBUG
-        fprintf(stderr, "USING TLSv1.2 HASH %s\n", EVP_MD_name(md));
-#endif
     } else if (!tls1_set_peer_legacy_sigalg(s, pkey)) {
             SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_PROCESS_CERT_VERIFY,
                      ERR_R_INTERNAL_ERROR);
@@ -392,6 +392,11 @@ MSG_PROCESS_RETURN tls_process_cert_verify(SSL *s, PACKET *pkt)
                  ERR_R_INTERNAL_ERROR);
         goto err;
     }
+
+#ifdef SSL_DEBUG
+    if (SSL_USE_SIGALGS(s))
+        fprintf(stderr, "USING TLSv1.2 HASH %s\n", EVP_MD_name(md));
+#endif
 
     /* Check for broken implementations of GOST ciphersuites */
     /*
@@ -744,6 +749,12 @@ MSG_PROCESS_RETURN tls_process_finished(SSL *s, PACKET *pkt)
 
     /* This is a real handshake so make sure we clean it up at the end */
     if (s->server) {
+        /*
+        * To get this far we must have read encrypted data from the client. We
+        * no longer tolerate unencrypted alerts. This value is ignored if less
+        * than TLSv1.3
+        */
+        s->statem.enc_read_state = ENC_READ_STATE_VALID;
         if (s->post_handshake_auth != SSL_PHA_REQUESTED)
             s->statem.cleanuphand = 1;
         if (SSL_IS_TLS13(s) && !tls13_save_handshake_digest_for_pha(s)) {
@@ -1001,7 +1012,6 @@ unsigned long ssl3_output_cert_chain(SSL *s, WPACKET *pkt, CERT_PKEY *cpk)
  */
 WORK_STATE tls_finish_handshake(SSL *s, WORK_STATE wst, int clearbufs, int stop)
 {
-    int discard;
     void (*cb) (const SSL *ssl, int type, int val) = NULL;
 
     if (clearbufs) {
@@ -1025,11 +1035,16 @@ WORK_STATE tls_finish_handshake(SSL *s, WORK_STATE wst, int clearbufs, int stop)
             && s->post_handshake_auth == SSL_PHA_REQUESTED)
         s->post_handshake_auth = SSL_PHA_EXT_SENT;
 
+    /*
+     * Only set if there was a Finished message and this isn't after a TLSv1.3
+     * post handshake exchange
+     */
     if (s->statem.cleanuphand) {
         /* skipped if we just sent a HelloRequest */
         s->renegotiate = 0;
         s->new_session = 0;
         s->statem.cleanuphand = 0;
+        s->ext.ticket_expected = 0;
 
         ssl3_cleanup_key_block(s);
 
@@ -1042,32 +1057,48 @@ WORK_STATE tls_finish_handshake(SSL *s, WORK_STATE wst, int clearbufs, int stop)
                 ssl_update_cache(s, SSL_SESS_CACHE_SERVER);
 
             /* N.B. s->ctx may not equal s->session_ctx */
-            CRYPTO_atomic_add(&s->ctx->stats.sess_accept_good, 1, &discard,
-                              s->ctx->lock);
+            tsan_counter(&s->ctx->stats.sess_accept_good);
             s->handshake_func = ossl_statem_accept;
+
+            if (SSL_IS_DTLS(s) && !s->hit) {
+                /*
+                 * We are finishing after the client. We start the timer going
+                 * in case there are any retransmits of our final flight
+                 * required.
+                 */
+                dtls1_start_timer(s);
+            }
         } else {
-            /*
-             * In TLSv1.3 we update the cache as part of processing the
-             * NewSessionTicket
-             */
-            if (!SSL_IS_TLS13(s))
+            if (SSL_IS_TLS13(s)) {
+                /*
+                 * We encourage applications to only use TLSv1.3 tickets once,
+                 * so we remove this one from the cache.
+                 */
+                if ((s->session_ctx->session_cache_mode
+                     & SSL_SESS_CACHE_CLIENT) != 0)
+                    SSL_CTX_remove_session(s->session_ctx, s->session);
+            } else {
+                /*
+                 * In TLSv1.3 we update the cache as part of processing the
+                 * NewSessionTicket
+                 */
                 ssl_update_cache(s, SSL_SESS_CACHE_CLIENT);
+            }
             if (s->hit)
-                CRYPTO_atomic_add(&s->session_ctx->stats.sess_hit, 1, &discard,
-                                  s->session_ctx->lock);
+                tsan_counter(&s->session_ctx->stats.sess_hit);
 
             s->handshake_func = ossl_statem_connect;
-            CRYPTO_atomic_add(&s->session_ctx->stats.sess_connect_good, 1,
-                              &discard, s->session_ctx->lock);
+            tsan_counter(&s->session_ctx->stats.sess_connect_good);
+
+            if (SSL_IS_DTLS(s) && s->hit) {
+                /*
+                 * We are finishing after the server. We start the timer going
+                 * in case there are any retransmits of our final flight
+                 * required.
+                 */
+                dtls1_start_timer(s);
+            }
         }
-
-        if (s->info_callback != NULL)
-            cb = s->info_callback;
-        else if (s->ctx->info_callback != NULL)
-            cb = s->ctx->info_callback;
-
-        if (cb != NULL)
-            cb(s, SSL_CB_HANDSHAKE_DONE, 1);
 
         if (SSL_IS_DTLS(s)) {
             /* done with handshaking */
@@ -1078,10 +1109,23 @@ WORK_STATE tls_finish_handshake(SSL *s, WORK_STATE wst, int clearbufs, int stop)
         }
     }
 
-    if (!stop)
-        return WORK_FINISHED_CONTINUE;
+    if (s->info_callback != NULL)
+        cb = s->info_callback;
+    else if (s->ctx->info_callback != NULL)
+        cb = s->ctx->info_callback;
 
+    /* The callback may expect us to not be in init at handshake done */
     ossl_statem_set_in_init(s, 0);
+
+    if (cb != NULL)
+        cb(s, SSL_CB_HANDSHAKE_DONE, 1);
+
+    if (!stop) {
+        /* If we've got more work to do we go back into init */
+        ossl_statem_set_in_init(s, 1);
+        return WORK_FINISHED_CONTINUE;
+    }
+
     return WORK_FINISHED_STOP;
 }
 
@@ -1277,73 +1321,59 @@ int tls_get_message_body(SSL *s, size_t *len)
     return 1;
 }
 
-int ssl_verify_alarm_type(long type)
-{
-    int al;
+static const X509ERR2ALERT x509table[] = {
+    {X509_V_ERR_APPLICATION_VERIFICATION, SSL_AD_HANDSHAKE_FAILURE},
+    {X509_V_ERR_CA_KEY_TOO_SMALL, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_CA_MD_TOO_WEAK, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_CERT_CHAIN_TOO_LONG, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_CERT_HAS_EXPIRED, SSL_AD_CERTIFICATE_EXPIRED},
+    {X509_V_ERR_CERT_NOT_YET_VALID, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_CERT_REJECTED, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_CERT_REVOKED, SSL_AD_CERTIFICATE_REVOKED},
+    {X509_V_ERR_CERT_SIGNATURE_FAILURE, SSL_AD_DECRYPT_ERROR},
+    {X509_V_ERR_CERT_UNTRUSTED, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_CRL_HAS_EXPIRED, SSL_AD_CERTIFICATE_EXPIRED},
+    {X509_V_ERR_CRL_NOT_YET_VALID, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_CRL_SIGNATURE_FAILURE, SSL_AD_DECRYPT_ERROR},
+    {X509_V_ERR_DANE_NO_MATCH, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_EE_KEY_TOO_SMALL, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_EMAIL_MISMATCH, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_HOSTNAME_MISMATCH, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_INVALID_CA, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_INVALID_CALL, SSL_AD_INTERNAL_ERROR},
+    {X509_V_ERR_INVALID_PURPOSE, SSL_AD_UNSUPPORTED_CERTIFICATE},
+    {X509_V_ERR_IP_ADDRESS_MISMATCH, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_OUT_OF_MEM, SSL_AD_INTERNAL_ERROR},
+    {X509_V_ERR_PATH_LENGTH_EXCEEDED, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_STORE_LOOKUP, SSL_AD_INTERNAL_ERROR},
+    {X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE, SSL_AD_BAD_CERTIFICATE},
+    {X509_V_ERR_UNABLE_TO_GET_CRL, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE, SSL_AD_UNKNOWN_CA},
+    {X509_V_ERR_UNSPECIFIED, SSL_AD_INTERNAL_ERROR},
 
-    switch (type) {
-    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT:
-    case X509_V_ERR_UNABLE_TO_GET_CRL:
-    case X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER:
-        al = SSL_AD_UNKNOWN_CA;
-        break;
-    case X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE:
-    case X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE:
-    case X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY:
-    case X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD:
-    case X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD:
-    case X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD:
-    case X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD:
-    case X509_V_ERR_CERT_NOT_YET_VALID:
-    case X509_V_ERR_CRL_NOT_YET_VALID:
-    case X509_V_ERR_CERT_UNTRUSTED:
-    case X509_V_ERR_CERT_REJECTED:
-    case X509_V_ERR_HOSTNAME_MISMATCH:
-    case X509_V_ERR_EMAIL_MISMATCH:
-    case X509_V_ERR_IP_ADDRESS_MISMATCH:
-    case X509_V_ERR_DANE_NO_MATCH:
-    case X509_V_ERR_EE_KEY_TOO_SMALL:
-    case X509_V_ERR_CA_KEY_TOO_SMALL:
-    case X509_V_ERR_CA_MD_TOO_WEAK:
-        al = SSL_AD_BAD_CERTIFICATE;
-        break;
-    case X509_V_ERR_CERT_SIGNATURE_FAILURE:
-    case X509_V_ERR_CRL_SIGNATURE_FAILURE:
-        al = SSL_AD_DECRYPT_ERROR;
-        break;
-    case X509_V_ERR_CERT_HAS_EXPIRED:
-    case X509_V_ERR_CRL_HAS_EXPIRED:
-        al = SSL_AD_CERTIFICATE_EXPIRED;
-        break;
-    case X509_V_ERR_CERT_REVOKED:
-        al = SSL_AD_CERTIFICATE_REVOKED;
-        break;
-    case X509_V_ERR_UNSPECIFIED:
-    case X509_V_ERR_OUT_OF_MEM:
-    case X509_V_ERR_INVALID_CALL:
-    case X509_V_ERR_STORE_LOOKUP:
-        al = SSL_AD_INTERNAL_ERROR;
-        break;
-    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
-    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
-    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
-    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
-    case X509_V_ERR_CERT_CHAIN_TOO_LONG:
-    case X509_V_ERR_PATH_LENGTH_EXCEEDED:
-    case X509_V_ERR_INVALID_CA:
-        al = SSL_AD_UNKNOWN_CA;
-        break;
-    case X509_V_ERR_APPLICATION_VERIFICATION:
-        al = SSL_AD_HANDSHAKE_FAILURE;
-        break;
-    case X509_V_ERR_INVALID_PURPOSE:
-        al = SSL_AD_UNSUPPORTED_CERTIFICATE;
-        break;
-    default:
-        al = SSL_AD_CERTIFICATE_UNKNOWN;
-        break;
-    }
-    return al;
+    /* Last entry; return this if we don't find the value above. */
+    {X509_V_OK, SSL_AD_CERTIFICATE_UNKNOWN}
+};
+
+int ssl_x509err2alert(int x509err)
+{
+    const X509ERR2ALERT *tp;
+
+    for (tp = x509table; tp->x509err != X509_V_OK; ++tp)
+        if (tp->x509err == x509err)
+            break;
+    return tp->alert;
 }
 
 int ssl_allow_compression(SSL *s)
@@ -1455,6 +1485,40 @@ static int ssl_method_error(const SSL *s, const SSL_METHOD *method)
 }
 
 /*
+ * Only called by servers. Returns 1 if the server has a TLSv1.3 capable
+ * certificate type, or has PSK configured. Otherwise returns 0.
+ */
+static int is_tls13_capable(const SSL *s)
+{
+    int i;
+
+#ifndef OPENSSL_NO_PSK
+    if (s->psk_server_callback != NULL)
+        return 1;
+#endif
+
+    if (s->psk_find_session_cb != NULL)
+        return 1;
+
+    for (i = 0; i < SSL_PKEY_NUM; i++) {
+        /* Skip over certs disallowed for TLSv1.3 */
+        switch (i) {
+        case SSL_PKEY_DSA_SIGN:
+        case SSL_PKEY_GOST01:
+        case SSL_PKEY_GOST12_256:
+        case SSL_PKEY_GOST12_512:
+            continue;
+        default:
+            break;
+        }
+        if (ssl_has_cert(s, i))
+            return 1;
+    }
+
+    return 0;
+}
+
+/*
  * ssl_version_supported - Check that the specified `version` is supported by
  * `SSL *` instance
  *
@@ -1463,7 +1527,7 @@ static int ssl_method_error(const SSL *s, const SSL_METHOD *method)
  *
  * Returns 1 when supported, otherwise 0
  */
-int ssl_version_supported(const SSL *s, int version)
+int ssl_version_supported(const SSL *s, int version, const SSL_METHOD **meth)
 {
     const version_info *vent;
     const version_info *table;
@@ -1483,9 +1547,14 @@ int ssl_version_supported(const SSL *s, int version)
     for (vent = table;
          vent->version != 0 && version_cmp(s, version, vent->version) <= 0;
          ++vent) {
-        if (vent->cmeth != NULL &&
-            version_cmp(s, version, vent->version) == 0 &&
-            ssl_method_error(s, vent->cmeth()) == 0) {
+        if (vent->cmeth != NULL
+                && version_cmp(s, version, vent->version) == 0
+                && ssl_method_error(s, vent->cmeth()) == 0
+                && (!s->server
+                    || version != TLS1_3_VERSION
+                    || is_tls13_capable(s))) {
+            if (meth != NULL)
+                *meth = vent->cmeth();
             return 1;
         }
     }
@@ -1594,11 +1663,18 @@ int ssl_set_version_bound(int method_version, int version, int *bound)
 static void check_for_downgrade(SSL *s, int vers, DOWNGRADE *dgrd)
 {
     if (vers == TLS1_2_VERSION
-            && ssl_version_supported(s, TLS1_3_VERSION)) {
+            && ssl_version_supported(s, TLS1_3_VERSION, NULL)) {
         *dgrd = DOWNGRADE_TO_1_2;
-    } else if (!SSL_IS_DTLS(s) && vers < TLS1_2_VERSION
-            && (ssl_version_supported(s, TLS1_2_VERSION)
-                || ssl_version_supported(s, TLS1_3_VERSION))) {
+    } else if (!SSL_IS_DTLS(s)
+            && vers < TLS1_2_VERSION
+               /*
+                * We need to ensure that a server that disables TLSv1.2
+                * (creating a hole between TLSv1.3 and TLSv1.1) can still
+                * complete handshakes with clients that support TLSv1.2 and
+                * below. Therefore we do not enable the sentinel if TLSv1.3 is
+                * enabled and TLSv1.2 is not.
+                */
+            && ssl_version_supported(s, TLS1_2_VERSION, NULL)) {
         *dgrd = DOWNGRADE_TO_1_1;
     } else {
         *dgrd = DOWNGRADE_NONE;
@@ -1681,30 +1757,23 @@ int ssl_choose_server_version(SSL *s, CLIENTHELLO_MSG *hello, DOWNGRADE *dgrd)
             return SSL_R_LENGTH_MISMATCH;
         }
 
+        /*
+         * The TLSv1.3 spec says the client MUST set this to TLS1_2_VERSION.
+         * The spec only requires servers to check that it isn't SSLv3:
+         * "Any endpoint receiving a Hello message with
+         * ClientHello.legacy_version or ServerHello.legacy_version set to
+         * 0x0300 MUST abort the handshake with a "protocol_version" alert."
+         * We are slightly stricter and require that it isn't SSLv3 or lower.
+         * We tolerate TLSv1 and TLSv1.1.
+         */
+        if (client_version <= SSL3_VERSION)
+            return SSL_R_BAD_LEGACY_VERSION;
+
         while (PACKET_get_net_2(&versionslist, &candidate_vers)) {
-            /* TODO(TLS1.3): Remove this before release */
-            if (candidate_vers == TLS1_3_VERSION_DRAFT)
-                candidate_vers = TLS1_3_VERSION;
-            /*
-             * TODO(TLS1.3): There is some discussion on the TLS list about
-             * whether to ignore versions <TLS1.2 in supported_versions. At the
-             * moment we honour them if present. To be reviewed later
-             */
             if (version_cmp(s, candidate_vers, best_vers) <= 0)
                 continue;
-            for (vent = table;
-                 vent->version != 0 && vent->version != (int)candidate_vers;
-                 ++vent)
-                continue;
-            if (vent->version != 0 && vent->smeth != NULL) {
-                const SSL_METHOD *method;
-
-                method = vent->smeth();
-                if (ssl_method_error(s, method) == 0) {
-                    best_vers = candidate_vers;
-                    best_method = method;
-                }
-            }
+            if (ssl_version_supported(s, candidate_vers, &best_method))
+                best_vers = candidate_vers;
         }
         if (PACKET_remaining(&versionslist) != 0) {
             /* Trailing data? */
@@ -1773,8 +1842,7 @@ int ssl_choose_client_version(SSL *s, int version, RAW_EXTENSION *extensions)
 {
     const version_info *vent;
     const version_info *table;
-    int highver = 0;
-    int origv;
+    int ret, ver_min, ver_max, real_max, origv;
 
     origv = s->version;
     s->version = version;
@@ -1821,64 +1889,62 @@ int ssl_choose_client_version(SSL *s, int version, RAW_EXTENSION *extensions)
         break;
     }
 
+    ret = ssl_get_min_max_version(s, &ver_min, &ver_max, &real_max);
+    if (ret != 0) {
+        s->version = origv;
+        SSLfatal(s, SSL_AD_PROTOCOL_VERSION,
+                 SSL_F_SSL_CHOOSE_CLIENT_VERSION, ret);
+        return 0;
+    }
+    if (SSL_IS_DTLS(s) ? DTLS_VERSION_LT(s->version, ver_min)
+                       : s->version < ver_min) {
+        s->version = origv;
+        SSLfatal(s, SSL_AD_PROTOCOL_VERSION,
+                 SSL_F_SSL_CHOOSE_CLIENT_VERSION, SSL_R_UNSUPPORTED_PROTOCOL);
+        return 0;
+    } else if (SSL_IS_DTLS(s) ? DTLS_VERSION_GT(s->version, ver_max)
+                              : s->version > ver_max) {
+        s->version = origv;
+        SSLfatal(s, SSL_AD_PROTOCOL_VERSION,
+                 SSL_F_SSL_CHOOSE_CLIENT_VERSION, SSL_R_UNSUPPORTED_PROTOCOL);
+        return 0;
+    }
+
+    if ((s->mode & SSL_MODE_SEND_FALLBACK_SCSV) == 0)
+        real_max = ver_max;
+
+    /* Check for downgrades */
+    if (s->version == TLS1_2_VERSION && real_max > s->version) {
+        if (memcmp(tls12downgrade,
+                   s->s3->server_random + SSL3_RANDOM_SIZE
+                                        - sizeof(tls12downgrade),
+                   sizeof(tls12downgrade)) == 0) {
+            s->version = origv;
+            SSLfatal(s, SSL_AD_ILLEGAL_PARAMETER,
+                     SSL_F_SSL_CHOOSE_CLIENT_VERSION,
+                     SSL_R_INAPPROPRIATE_FALLBACK);
+            return 0;
+        }
+    } else if (!SSL_IS_DTLS(s)
+               && s->version < TLS1_2_VERSION
+               && real_max > s->version) {
+        if (memcmp(tls11downgrade,
+                   s->s3->server_random + SSL3_RANDOM_SIZE
+                                        - sizeof(tls11downgrade),
+                   sizeof(tls11downgrade)) == 0) {
+            s->version = origv;
+            SSLfatal(s, SSL_AD_ILLEGAL_PARAMETER,
+                     SSL_F_SSL_CHOOSE_CLIENT_VERSION,
+                     SSL_R_INAPPROPRIATE_FALLBACK);
+            return 0;
+        }
+    }
+
     for (vent = table; vent->version != 0; ++vent) {
-        const SSL_METHOD *method;
-        int err;
-
-        if (vent->cmeth == NULL)
+        if (vent->cmeth == NULL || s->version != vent->version)
             continue;
 
-        if (highver != 0 && s->version != vent->version)
-            continue;
-
-        method = vent->cmeth();
-        err = ssl_method_error(s, method);
-        if (err != 0) {
-            if (s->version == vent->version) {
-                s->version = origv;
-                SSLfatal(s, SSL_AD_PROTOCOL_VERSION,
-                         SSL_F_SSL_CHOOSE_CLIENT_VERSION, err);
-                return 0;
-            }
-
-            continue;
-        }
-        if (highver == 0)
-            highver = vent->version;
-
-        if (s->version != vent->version)
-            continue;
-
-#ifndef OPENSSL_NO_TLS13DOWNGRADE
-        /* Check for downgrades */
-        if (s->version == TLS1_2_VERSION && highver > s->version) {
-            if (memcmp(tls12downgrade,
-                       s->s3->server_random + SSL3_RANDOM_SIZE
-                                            - sizeof(tls12downgrade),
-                       sizeof(tls12downgrade)) == 0) {
-                s->version = origv;
-                SSLfatal(s, SSL_AD_ILLEGAL_PARAMETER,
-                         SSL_F_SSL_CHOOSE_CLIENT_VERSION,
-                         SSL_R_INAPPROPRIATE_FALLBACK);
-                return 0;
-            }
-        } else if (!SSL_IS_DTLS(s)
-                   && s->version < TLS1_2_VERSION
-                   && highver > s->version) {
-            if (memcmp(tls11downgrade,
-                       s->s3->server_random + SSL3_RANDOM_SIZE
-                                            - sizeof(tls11downgrade),
-                       sizeof(tls11downgrade)) == 0) {
-                s->version = origv;
-                SSLfatal(s, SSL_AD_ILLEGAL_PARAMETER,
-                         SSL_F_SSL_CHOOSE_CLIENT_VERSION,
-                         SSL_R_INAPPROPRIATE_FALLBACK);
-                return 0;
-            }
-        }
-#endif
-
-        s->method = method;
+        s->method = vent->cmeth();
         return 1;
     }
 
@@ -1893,6 +1959,9 @@ int ssl_choose_client_version(SSL *s, int version, RAW_EXTENSION *extensions)
  * @s: The SSL connection
  * @min_version: The minimum supported version
  * @max_version: The maximum supported version
+ * @real_max:    The highest version below the lowest compile time version hole
+ *               where that hole lies above at least one run-time enabled
+ *               protocol.
  *
  * Work out what version we should be using for the initial ClientHello if the
  * version is initially (D)TLS_ANY_VERSION.  We apply any explicit SSL_OP_NO_xxx
@@ -1907,9 +1976,10 @@ int ssl_choose_client_version(SSL *s, int version, RAW_EXTENSION *extensions)
  * Returns 0 on success or an SSL error reason number on failure.  On failure
  * min_version and max_version will also be set to 0.
  */
-int ssl_get_min_max_version(const SSL *s, int *min_version, int *max_version)
+int ssl_get_min_max_version(const SSL *s, int *min_version, int *max_version,
+                            int *real_max)
 {
-    int version;
+    int version, tmp_real_max;
     int hole;
     const SSL_METHOD *single = NULL;
     const SSL_METHOD *method;
@@ -1926,6 +1996,12 @@ int ssl_get_min_max_version(const SSL *s, int *min_version, int *max_version)
          * ssl_method_error(s, s->method)
          */
         *min_version = *max_version = s->version;
+        /*
+         * Providing a real_max only makes sense where we're using a version
+         * flexible method.
+         */
+        if (!ossl_assert(real_max == NULL))
+            return ERR_R_INTERNAL_ERROR;
         return 0;
     case TLS_ANY_VERSION:
         table = tls_version_table;
@@ -1958,6 +2034,9 @@ int ssl_get_min_max_version(const SSL *s, int *min_version, int *max_version)
      */
     *min_version = version = 0;
     hole = 1;
+    if (real_max != NULL)
+        *real_max = 0;
+    tmp_real_max = 0;
     for (vent = table; vent->version != 0; ++vent) {
         /*
          * A table entry with a NULL client method is still a hole in the
@@ -1965,15 +2044,22 @@ int ssl_get_min_max_version(const SSL *s, int *min_version, int *max_version)
          */
         if (vent->cmeth == NULL) {
             hole = 1;
+            tmp_real_max = 0;
             continue;
         }
         method = vent->cmeth();
+
+        if (hole == 1 && tmp_real_max == 0)
+            tmp_real_max = vent->version;
+
         if (ssl_method_error(s, method) != 0) {
             hole = 1;
         } else if (!hole) {
             single = NULL;
             *min_version = method->version;
         } else {
+            if (real_max != NULL && tmp_real_max != 0)
+                *real_max = tmp_real_max;
             version = (single = method)->version;
             *min_version = version;
             hole = 0;
@@ -2001,7 +2087,14 @@ int ssl_set_client_hello_version(SSL *s)
 {
     int ver_min, ver_max, ret;
 
-    ret = ssl_get_min_max_version(s, &ver_min, &ver_max);
+    /*
+     * In a renegotiation we always send the same client_version that we sent
+     * last time, regardless of which version we eventually negotiated.
+     */
+    if (!SSL_IS_FIRST_HANDSHAKE(s))
+        return 0;
+
+    ret = ssl_get_min_max_version(s, &ver_min, &ver_max, NULL);
 
     if (ret != 0)
         return ret;

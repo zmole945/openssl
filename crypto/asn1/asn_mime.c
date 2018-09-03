@@ -883,8 +883,6 @@ static MIME_HEADER *mime_hdr_find(STACK_OF(MIME_HEADER) *hdrs, const char *name)
     htmp.params = NULL;
 
     idx = sk_MIME_HEADER_find(hdrs, &htmp);
-    if (idx < 0)
-        return NULL;
     return sk_MIME_HEADER_value(hdrs, idx);
 }
 
@@ -896,8 +894,6 @@ static MIME_PARAM *mime_param_find(MIME_HEADER *hdr, const char *name)
     param.param_name = (char *)name;
     param.param_value = NULL;
     idx = sk_MIME_PARAM_find(hdr->params, &param);
-    if (idx < 0)
-        return NULL;
     return sk_MIME_PARAM_value(hdr->params, idx);
 }
 
@@ -953,12 +949,14 @@ static int strip_eol(char *linebuf, int *plen, int flags)
 
     for (p = linebuf + len - 1; len > 0; len--, p--) {
         c = *p;
-        if (c == '\n')
+        if (c == '\n') {
             is_eol = 1;
-        else if (is_eol && flags & SMIME_ASCIICRLF && c < 33)
+        } else if (is_eol && flags & SMIME_ASCIICRLF && c == 32) {
+            /* Strip trailing space on a line; 32 == ASCII for ' ' */
             continue;
-        else if (c != '\r')
+        } else if (c != '\r') {
             break;
+        }
     }
     *plen = len;
     return is_eol;

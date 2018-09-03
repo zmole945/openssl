@@ -154,7 +154,7 @@ int tls1_change_cipher_state(SSL *s, int which)
         mac_secret = &(s->s3->read_mac_secret[0]);
         mac_secret_size = &(s->s3->read_mac_secret_size);
     } else {
-        s->statem.invalid_enc_write_ctx = 1;
+        s->statem.enc_write_state = ENC_WRITE_STATE_INVALID;
         if (s->ext.use_etm)
             s->s3->flags |= TLS1_FLAGS_ENCRYPT_THEN_MAC_WRITE;
         else
@@ -257,7 +257,7 @@ int tls1_change_cipher_state(SSL *s, int which)
 
     if (!(EVP_CIPHER_flags(c) & EVP_CIPH_FLAG_AEAD_CIPHER)) {
         /* TODO(size_t): Convert this function */
-        mac_key = EVP_PKEY_new_raw_private_key(mac_type, NULL, mac_secret,
+        mac_key = EVP_PKEY_new_mac_key(mac_type, NULL, mac_secret,
                                                (int)*mac_secret_size);
         if (mac_key == NULL
             || EVP_DigestSignInit(mac_ctx, NULL, m, NULL, mac_key) <= 0) {
@@ -316,7 +316,7 @@ int tls1_change_cipher_state(SSL *s, int which)
                  ERR_R_INTERNAL_ERROR);
         goto err;
     }
-    s->statem.invalid_enc_write_ctx = 0;
+    s->statem.enc_write_state = ENC_WRITE_STATE_VALID;
 
 #ifdef SSL_DEBUG
     printf("which = %04X\nkey=", which);

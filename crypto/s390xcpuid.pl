@@ -262,6 +262,48 @@ OPENSSL_vx_probe:
 .size	OPENSSL_vx_probe,.-OPENSSL_vx_probe
 ___
 
+{
+################
+# void s390x_kimd(const unsigned char *in, size_t len, unsigned int fc,
+#                 void *param)
+my ($in,$len,$fc,$param) = map("%r$_",(2..5));
+$code.=<<___;
+.globl	s390x_kimd
+.type	s390x_kimd,\@function
+.align	16
+s390x_kimd:
+	llgfr	%r0,$fc
+	lgr	%r1,$param
+
+	.long	0xb93e0002	# kimd %r0,%r2
+	brc	1,.-4		# pay attention to "partial completion"
+
+	br	$ra
+.size	s390x_kimd,.-s390x_kimd
+___
+}
+
+{
+################
+# void s390x_klmd(const unsigned char *in, size_t inlen, unsigned char *out,
+#                 size_t outlen, unsigned int fc, void *param)
+my ($in,$inlen,$out,$outlen,$fc) = map("%r$_",(2..6));
+$code.=<<___;
+.globl	s390x_klmd
+.type	s390x_klmd,\@function
+.align	32
+s390x_klmd:
+	llgfr	%r0,$fc
+	l${g}	%r1,$stdframe($sp)
+
+	.long	0xb93f0042	# klmd %r4,%r2
+	brc	1,.-4		# pay attention to "partial completion"
+
+	br	$ra
+.size	s390x_klmd,.-s390x_klmd
+___
+}
+
 ################
 # void s390x_km(const unsigned char *in, size_t len, unsigned char *out,
 #               unsigned int fc, void *param)
@@ -301,6 +343,48 @@ s390x_kmac:
 
 	br	$ra
 .size	s390x_kmac,.-s390x_kmac
+___
+}
+
+################
+# void s390x_kmo(const unsigned char *in, size_t len, unsigned char *out,
+#                unsigned int fc, void *param)
+{
+my ($in,$len,$out,$fc,$param) = map("%r$_",(2..6));
+$code.=<<___;
+.globl	s390x_kmo
+.type	s390x_kmo,\@function
+.align	16
+s390x_kmo:
+	lr	%r0,$fc
+	l${g}r	%r1,$param
+
+	.long	0xb92b0042	# kmo $out,$in
+	brc	1,.-4		# pay attention to "partial completion"
+
+	br	$ra
+.size	s390x_kmo,.-s390x_kmo
+___
+}
+
+################
+# void s390x_kmf(const unsigned char *in, size_t len, unsigned char *out,
+#                unsigned int fc, void *param)
+{
+my ($in,$len,$out,$fc,$param) = map("%r$_",(2..6));
+$code.=<<___;
+.globl	s390x_kmf
+.type	s390x_kmf,\@function
+.align	16
+s390x_kmf:
+	lr	%r0,$fc
+	l${g}r	%r1,$param
+
+	.long	0xb92a0042	# kmf $out,$in
+	brc	1,.-4		# pay attention to "partial completion"
+
+	br	$ra
+.size	s390x_kmf,.-s390x_kmf
 ___
 }
 
