@@ -996,6 +996,7 @@ reconfigure reconf:
       my $generator = join(" ", @{$args{generator}});
       my $generator_incs = join("", map { " -I".$_ } @{$args{generator_incs}});
       my $incs = join("", map { " -I".$_ } @{$args{incs}});
+      my $defs = join("", map { " -D".$_ } @{$args{defs}});
       my $deps = join(" ", @{$args{generator_deps}}, @{$args{deps}});
 
       if ($args{src} =~ /\.ld$/) {
@@ -1049,7 +1050,7 @@ EOF
           }
           return <<"EOF";
 $args{src}: $args{generator}->[0] $deps
-	\$(CC) $incs $cppflags -E $args{generator}->[0] | \\
+	\$(CC) $incs $cppflags $defs -E $args{generator}->[0] | \\
 	\$(PERL) -ne '/^#(line)?\\s*[0-9]+/ or print' > \$@
 EOF
       }
@@ -1065,6 +1066,7 @@ EOF
       my $srcs = join(" ",  @srcs);
       my $deps = join(" ", @srcs, @{$args{deps}});
       my $incs = join("", map { " -I".$_ } @{$args{incs}});
+      my $defs = join("", map { " -D".$_ } @{$args{defs}});
       my $cmd;
       my $cmdflags;
       my $cmdcompile;
@@ -1106,13 +1108,13 @@ EOF
           # hardly a point to drag it along...
           $recipe .= <<"EOF";
 $obj$objext: $deps
-	$cmd $incs $cmdflags -c -o \$\@ $srcs
+	$cmd $incs $defs $cmdflags -c -o \$\@ $srcs
 EOF
       } elsif (defined $makedepprog && $makedepprog !~ /\/makedepend/
                && !grep /\.rc$/, @srcs) {
           $recipe .= <<"EOF";
 $obj$objext: $deps
-	$cmd $incs $cmdflags -MMD -MF $obj$depext.tmp -MT \$\@ -c -o \$\@ $srcs
+	$cmd $incs $defs $cmdflags -MMD -MF $obj$depext.tmp -MT \$\@ -c -o \$\@ $srcs
 	\@touch $obj$depext.tmp
 	\@if cmp $obj$depext.tmp $obj$depext > /dev/null 2> /dev/null; then \\
 		rm -f $obj$depext.tmp; \\
@@ -1123,7 +1125,7 @@ EOF
       } else {
           $recipe .= <<"EOF";
 $obj$objext: $deps
-	$cmd $incs $cmdflags $cmdcompile -o \$\@ $srcs
+	$cmd $incs $defs $cmdflags $cmdcompile -o \$\@ $srcs
 EOF
           if (defined $makedepprog  && $makedepprog =~ /\/makedepend/) {
               $recipe .= <<"EOF";
@@ -1134,9 +1136,7 @@ EOF
       }
       return $recipe;
   }
-  # On Unix, we build shlibs from static libs, so we're ignoring the
-  # object file array.  We *know* this routine is only called when we've
-  # configure 'shared'.
+  # We *know* this routine is only called when we've configure 'shared'.
   sub obj2shlib {
       my %args = @_;
       my $lib = $args{lib};
@@ -1163,26 +1163,20 @@ EOF
       die "More than one exported symbol map" if scalar @defs > 1;
       my $objs = join(" ", @objs);
       my $deps = join(" ", @objs, @defs, @deps);
-      my $target = shlib_simple($lib);
-      my $target_full = shlib($lib);
+      my $simple = shlib_simple($lib);
+      my $full = shlib($lib);
+      my $target = "$simple $full";
       my $shared_soname = "";
-      $shared_soname .= ' '.$target{shared_sonameflag}.basename($target_full)
+      $shared_soname .= ' '.$target{shared_sonameflag}.basename($full)
           if defined $target{shared_sonameflag};
       my $shared_imp = "";
-      $shared_imp .= ' '.$target{shared_impflag}.basename($target)
+      $shared_imp .= ' '.$target{shared_impflag}.basename($simple)
           if defined $target{shared_impflag};
       my $shared_def = join("", map { ' '.$target{shared_defflag}.$_ } @defs);
       my $recipe = <<"EOF";
-# When building on a Windows POSIX layer (Cygwin or Mingw), we know for a fact
-# that two files get produced, {shlibname}.dll and {libname}.dll.a.
-# With all other Unix platforms, we often build a shared library with the
-# SO version built into the file name and a symlink without the SO version
-# It's not necessary to have both as targets.  The choice falls on the
-# simplest, {libname}\$(SHLIB_EXT_IMPORT) for Windows POSIX layers and
-# {libname}\$(SHLIB_EXT_SIMPLE) for the Unix platforms.
 $target: $deps
 	\$(CC) \$(LIB_CFLAGS) $linkflags\$(LIB_LDFLAGS)$shared_soname$shared_imp \\
-		-o $target_full$shared_def $objs \\
+		-o $full$shared_def $objs \\
                 $linklibs \$(LIB_EX_LIBS)
 EOF
       if (windowsdll()) {
@@ -1196,14 +1190,14 @@ EOF
 EOF
       } elsif (sharedaix()) {
           $recipe .= <<"EOF";
-	rm -f $target && \\
-	\$(AR) r $target $target_full
+	rm -f $simple && \\
+	\$(AR) r $simple $full
 EOF
       } else {
           $recipe .= <<"EOF";
-	if [ '$target' != '$target_full' ]; then \\
-		rm -f $target; \\
-		ln -s $target_full $target; \\
+	if [ '$simple' != '$full' ]; then \\
+		rm -f $simple; \\
+		ln -s $full $simple; \\
 	fi
 EOF
       }
@@ -1311,6 +1305,10 @@ EOF
                       lib => $libext,
                       bin => $exeext );
 
+      # We already have a 'test' target, and the top directory is just plain
+      # silly
+      return if $dir eq "test" || $dir eq ".";
+
       foreach my $type (("dso", "lib", "bin", "script")) {
           next unless defined($unified_info{dirinfo}->{$dir}->{products}->{$type});
           # For lib object files, we could update the library.  However, it
@@ -1331,7 +1329,7 @@ EOF
       my $deps = join(" ", @deps);
       my $actions = join("\n", "", @actions);
       return <<"EOF";
-$args{dir} $args{dir}/: $deps$actions
+$dir $dir/: $deps$actions
 EOF
   }
   ""    # Important!  This becomes part of the template result.

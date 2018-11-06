@@ -962,7 +962,7 @@ static int final_server_name(SSL *s, unsigned int context, int sent)
      */
     if (SSL_IS_FIRST_HANDSHAKE(s) && s->ctx != s->session_ctx) {
         tsan_counter(&s->ctx->stats.sess_accept);
-        tsan_counter(&s->session_ctx->stats.sess_accept);
+        tsan_decr(&s->session_ctx->stats.sess_accept);
     }
 
     /*
@@ -1530,10 +1530,12 @@ int tls_psk_do_binder(SSL *s, const EVP_MD *md, const unsigned char *msgstart,
      */
     if (s->hello_retry_request == SSL_HRR_PENDING) {
         size_t hdatalen;
+        long hdatalen_l;
         void *hdata;
 
-        hdatalen = BIO_get_mem_data(s->s3->handshake_buffer, &hdata);
-        if (hdatalen <= 0) {
+        hdatalen = hdatalen_l =
+            BIO_get_mem_data(s->s3->handshake_buffer, &hdata);
+        if (hdatalen_l <= 0) {
             SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_PSK_DO_BINDER,
                      SSL_R_BAD_HANDSHAKE_LENGTH);
             goto err;

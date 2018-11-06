@@ -50,6 +50,11 @@ int ERR_load_EVP_strings(void);
 # define EVP_F_EVP_DIGESTINIT_EX                          128
 # define EVP_F_EVP_ENCRYPTFINAL_EX                        127
 # define EVP_F_EVP_ENCRYPTUPDATE                          167
+# define EVP_F_EVP_MAC_CTRL                               209
+# define EVP_F_EVP_MAC_CTRL_STR                           210
+# define EVP_F_EVP_MAC_CTX_COPY                           211
+# define EVP_F_EVP_MAC_CTX_NEW                            213
+# define EVP_F_EVP_MAC_INIT                               212
 # define EVP_F_EVP_MD_CTX_COPY_EX                         110
 # define EVP_F_EVP_MD_SIZE                                162
 # define EVP_F_EVP_OPENINIT                               102
@@ -106,13 +111,16 @@ int ERR_load_EVP_strings(void);
 # define EVP_F_EVP_PKEY_VERIFY_RECOVER_INIT               145
 # define EVP_F_EVP_SIGNFINAL                              107
 # define EVP_F_EVP_VERIFYFINAL                            108
+# define EVP_F_GMAC_CTRL                                  215
 # define EVP_F_INT_CTX_NEW                                157
 # define EVP_F_OK_NEW                                     200
 # define EVP_F_PKCS5_PBE_KEYIVGEN                         117
 # define EVP_F_PKCS5_V2_PBE_KEYIVGEN                      118
 # define EVP_F_PKCS5_V2_PBKDF2_KEYIVGEN                   164
 # define EVP_F_PKCS5_V2_SCRYPT_KEYIVGEN                   180
+# define EVP_F_PKEY_MAC_INIT                              214
 # define EVP_F_PKEY_SET_TYPE                              158
+# define EVP_F_POLY1305_CTRL                              216
 # define EVP_F_RC2_MAGIC_TO_METH                          109
 # define EVP_F_RC5_CTRL                                   125
 # define EVP_F_S390X_AES_GCM_CTRL                         201
@@ -127,6 +135,7 @@ int ERR_load_EVP_strings(void);
 # define EVP_R_BAD_DECRYPT                                100
 # define EVP_R_BUFFER_TOO_SMALL                           155
 # define EVP_R_CAMELLIA_KEY_SETUP_FAILED                  157
+# define EVP_R_CIPHER_NOT_GCM_MODE                        184
 # define EVP_R_CIPHER_PARAMETER_ERROR                     122
 # define EVP_R_COMMAND_NOT_SUPPORTED                      147
 # define EVP_R_COPY_ERROR                                 173
