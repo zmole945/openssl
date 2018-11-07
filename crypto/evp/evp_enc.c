@@ -167,6 +167,7 @@ int EVP_CipherInit_ex(EVP_CIPHER_CTX *ctx, const EVP_CIPHER *cipher,
 
         case EVP_CIPH_STREAM_CIPHER:
         case EVP_CIPH_ECB_MODE:
+        //case EVP_CIPH_GCM_MODE:
             break;
 
         case EVP_CIPH_CFB_MODE:
@@ -595,6 +596,7 @@ int EVP_CIPHER_CTX_ctrl(EVP_CIPHER_CTX *ctx, int type, int arg, void *ptr)
                EVP_R_CTRL_OPERATION_NOT_IMPLEMENTED);
         return 0;
     }
+
     return ret;
 }
 
