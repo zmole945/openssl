@@ -45,6 +45,8 @@ typedef enum OPTION_choice {
     OPT_NOPAD, OPT_SALT, OPT_NOSALT, OPT_DEBUG, OPT_UPPER_P, OPT_UPPER_A,
     OPT_A, OPT_Z, OPT_BUFSIZE, OPT_K, OPT_KFILE, OPT_UPPER_K, OPT_NONE,
     OPT_UPPER_S, OPT_IV, OPT_MD, OPT_ITER, OPT_PBKDF2, OPT_CIPHER,
+    OPT_AAD,
+    OPT_TAG,
     OPT_R_ENUM
 } OPTION_CHOICE;
 
@@ -73,6 +75,8 @@ const OPTIONS enc_options[] = {
     {"K", OPT_UPPER_K, 's', "Raw key, in hex"},
     {"S", OPT_UPPER_S, 's', "Salt, in hex"},
     {"iv", OPT_IV, 's', "IV in hex"},
+    {"aad", OPT_AAD, 's', "GCM AAD in hex"},
+    {"tag", OPT_TAG, 's', "GCM TAG in hex"},
     {"md", OPT_MD, 's', "Use specified digest to create a key from the passphrase"},
     {"iter", OPT_ITER, 'p', "Specify the iteration count and force use of PBKDF2"},
     {"pbkdf2", OPT_PBKDF2, '-', "Use password-based key derivation function 2"},
@@ -88,6 +92,9 @@ const OPTIONS enc_options[] = {
     {NULL}
 };
 
+#define MAX_AAD_LENGTH  16
+#define TAG_LENGTH      16
+
 int enc_main(int argc, char **argv)
 {
     static char buf[128];
@@ -99,6 +106,8 @@ int enc_main(int argc, char **argv)
     const EVP_CIPHER *cipher = NULL, *c;
     const EVP_MD *dgst = NULL;
     char *hkey = NULL, *hiv = NULL, *hsalt = NULL, *p;
+    char *haad = NULL;
+    char *htag = NULL;
     char *infile = NULL, *outfile = NULL, *prog;
     char *str = NULL, *passarg = NULL, *pass = NULL, *strbuf = NULL;
     char mbuf[sizeof(magic) - 1];
@@ -108,6 +117,9 @@ int enc_main(int argc, char **argv)
     int base64 = 0, informat = FORMAT_BINARY, outformat = FORMAT_BINARY;
     int ret = 1, inl, nopad = 0;
     unsigned char key[EVP_MAX_KEY_LENGTH], iv[EVP_MAX_IV_LENGTH];
+    unsigned char aad[MAX_AAD_LENGTH];
+    unsigned char tag[TAG_LENGTH];
+    int aadlen;
     unsigned char *buff = NULL, salt[PKCS5_SALT_LEN];
     int pbkdf2 = 0;
     int iter = 0;
@@ -250,6 +262,12 @@ int enc_main(int argc, char **argv)
         case OPT_IV:
             hiv = opt_arg();
             break;
+        case OPT_AAD:
+            haad = opt_arg();
+            break;
+        case OPT_TAG:
+            htag = opt_arg();
+            break;
         case OPT_MD:
             if (!opt_md(opt_arg(), &dgst))
                 goto opthelp;
@@ -283,10 +301,13 @@ int enc_main(int argc, char **argv)
         goto opthelp;
     }
 
+#if 1
+#else
     if (cipher && EVP_CIPHER_flags(cipher) & EVP_CIPH_FLAG_AEAD_CIPHER) {
         BIO_printf(bio_err, "%s: AEAD ciphers not supported\n", prog);
         goto end;
     }
+#endif
 
     if (cipher && (EVP_CIPHER_mode(cipher) == EVP_CIPH_XTS_MODE)) {
         BIO_printf(bio_err, "%s XTS ciphers not supported\n", prog);
@@ -524,6 +545,77 @@ int enc_main(int argc, char **argv)
             OPENSSL_cleanse(hkey, strlen(hkey));
         }
 
+        if (strcmp(EVP_CIPHER_name(cipher), "id-aes128-GCM") == 0) {
+            if (haad != NULL) {
+                char* tmphaad;
+                if (strlen(haad)%2 == 0) {
+                    aadlen = strlen(haad)/2;
+                    tmphaad = malloc(aadlen*2+1);
+                    memcpy(tmphaad, haad, aadlen*2);
+                } else {
+                    aadlen = strlen(haad)/2 + 1;
+                    tmphaad = malloc(aadlen*2+1);
+                    memcpy(tmphaad, haad, aadlen*2);
+                    tmphaad[aadlen*2-1] = '0';
+                }
+
+                aadlen = (aadlen > MAX_AAD_LENGTH) ? MAX_AAD_LENGTH : aadlen;
+                tmphaad[aadlen*2]   = '\0';
+
+                if (!set_hex(tmphaad, aad, aadlen)) {
+                    BIO_printf(bio_err, "invalid hex aad value\n");
+                    free(tmphaad);
+                    goto end;
+                } else {
+                    free(tmphaad);
+                }
+
+                /* wiping secret data as we no longer need it */
+                OPENSSL_cleanse(haad, strlen(haad));
+            } else {
+                aadlen = MAX_AAD_LENGTH;
+                memset(aad, 0, aadlen);
+            }
+
+            if (enc) {
+            } else {
+                char* tmphtag;
+                tmphtag = malloc(TAG_LENGTH*2+1);
+                if (htag != NULL) {
+                    memset(tmphtag, '0', TAG_LENGTH*2);
+                    tmphtag[TAG_LENGTH*2]   = '\0';
+
+                    if (strlen(htag) > TAG_LENGTH*2) {
+                        memcpy(tmphtag, htag, TAG_LENGTH);
+                    } else {
+                        memcpy(tmphtag, htag, strlen(htag));
+                    }
+
+                    if (!set_hex(tmphtag, tag, TAG_LENGTH)) {
+                        BIO_printf(bio_err, "invalid hex tag value\n");
+                        free(tmphtag);
+                        goto end;
+                    } else {
+                        free(tmphtag);
+                    }
+
+                    /* wiping secret data as we no longer need it */
+                    OPENSSL_cleanse(htag, strlen(htag));
+                } else {
+                    memset(tmphtag, '0', TAG_LENGTH*2);
+                    tmphtag[TAG_LENGTH*2]   = '\0';
+
+                    if (!set_hex(tmphtag, tag, TAG_LENGTH)) {
+                        BIO_printf(bio_err, "invalid hex tag value\n");
+                        free(tmphtag);
+                        goto end;
+                    } else {
+                        free(tmphtag);
+                    }
+                }
+            }
+        }
+
         if ((benc = BIO_new(BIO_f_cipher())) == NULL)
             goto end;
 
@@ -551,6 +643,25 @@ int enc_main(int argc, char **argv)
             goto end;
         }
 
+        if (strcmp(EVP_CIPHER_name(cipher), "id-aes128-GCM") == 0) {
+            int len;
+            if (enc) {
+                if (!EVP_EncryptUpdate(ctx, NULL, &len, aad, aadlen)) {
+                    BIO_printf(bio_err, "Error setting AAD for cipher %s\n",
+                            EVP_CIPHER_name(cipher));
+                    ERR_print_errors(bio_err);
+                    goto end;
+                }
+            } else {
+                if (!EVP_DecryptUpdate(ctx, NULL, &len, aad, aadlen)) {
+                    BIO_printf(bio_err, "Error setting AAD for cipher %s\n",
+                            EVP_CIPHER_name(cipher));
+                    ERR_print_errors(bio_err);
+                    goto end;
+                }
+            }
+        }
+
         if (debug) {
             BIO_set_callback(benc, BIO_debug_callback);
             BIO_set_callback_arg(benc, (char *)bio_err);
@@ -575,6 +686,19 @@ int enc_main(int argc, char **argv)
                     printf("%02X", iv[i]);
                 printf("\n");
             }
+            if (strcmp(EVP_CIPHER_name(cipher), "id-aes128-GCM") == 0) {
+                printf("aad=");
+                for (i = 0; i < aadlen; i++)
+                    printf("%02X", aad[i]);
+                printf("\n");
+                if (enc) {
+                } else {
+                    printf("tag=");
+                    for (i = 0; i < TAG_LENGTH; i++)
+                        printf("%02X", tag[i]);
+                    printf("\n");
+                }
+            }
             if (printkey == 2) {
                 ret = 0;
                 goto end;
@@ -595,9 +719,36 @@ int enc_main(int argc, char **argv)
             goto end;
         }
     }
-    if (!BIO_flush(wbio)) {
-        BIO_printf(bio_err, "bad decrypt\n");
-        goto end;
+
+    if (strcmp(EVP_CIPHER_name(cipher), "id-aes128-GCM") == 0) {
+        if (enc) {
+            if (!BIO_flush(wbio)) {
+                BIO_printf(bio_err, "bad encrypt\n");
+                goto end;
+            }
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_LENGTH, tag);
+            {
+                int i;
+                printf("tag=");
+                for (i=0;i<TAG_LENGTH;i++) {
+                    printf("%2.2x", tag[i]);
+                }
+                printf("\n");
+            }
+        } else {
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_LENGTH, tag);
+            if (!BIO_flush(wbio)) {
+                BIO_printf(bio_err, "verify failed\n");
+                goto end;
+            } else {
+                BIO_printf(bio_err, "verify OK\n");
+            }
+        }
+    } else {
+        if (!BIO_flush(wbio)) {
+            BIO_printf(bio_err, "bad decrypt\n");
+            goto end;
+        }
     }
 
     ret = 0;
