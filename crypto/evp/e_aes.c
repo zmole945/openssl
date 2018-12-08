@@ -302,10 +302,43 @@ static int aesni_init_key(EVP_CIPHER_CTX *ctx, const unsigned char *key,
 static int aesni_cbc_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
                             const unsigned char *in, size_t len)
 {
+    {
+        int i=0;
+        unsigned char* key = &EVP_C_DATA(EVP_AES_KEY,ctx)->ks.ks;
+        printf("aesni_cbc_cipher key: ");
+        for (i=0; i<16; i++) {
+            printf("%2.2x", ((unsigned char*)key)[i]);
+        }
+        printf("\n");
+    }
+    {
+        int i=0;
+        unsigned char* iv = EVP_CIPHER_CTX_iv_noconst(ctx);
+        printf("aesni_cbc_cipher iv : ");
+        for (i=0; i<16; i++) {
+            printf("%2.2x", ((unsigned char*)iv)[i]);
+        }
+        printf("\n");
+    }
+    {
+        int i=0;
+        printf("aesni_cbc_cipher in : ");
+        for (i=0; i<len; i++) {
+            printf("%2.2x", ((unsigned char*)in)[i]);
+        }
+        printf("\n");
+    }
     aesni_cbc_encrypt(in, out, len, &EVP_C_DATA(EVP_AES_KEY,ctx)->ks.ks,
                       EVP_CIPHER_CTX_iv_noconst(ctx),
                       EVP_CIPHER_CTX_encrypting(ctx));
-
+    {
+        int i=0;
+        printf("aesni_cbc_cipher out: ");
+        for (i=0; i<len; i++) {
+            printf("%2.2x", ((unsigned char*)out)[i]);
+        }
+        printf("\n");
+    }
     return 1;
 }
 
