@@ -398,6 +398,7 @@ my @disablables = (
     "weak-ssl-ciphers",
     "zlib",
     "zlib-dynamic",
+    "zuc"
     );
 foreach my $proto ((@tls, @dtls))
 	{

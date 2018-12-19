@@ -5209,3 +5209,17 @@
 #define LN_uacurve9             "DSTU curve 9"
 #define NID_uacurve9            1169
 #define OBJ_uacurve9            OBJ_dstu4145le,2L,9L
+
+#define SN_zuc          "ZUC"
+#define LN_zuc          "zuc"
+#define NID_zuc         1198
+#define OBJ_zuc         OBJ_sm_scheme,800L
+
+#define SN_zuc_128eea3          "zuc-128eea3"
+#define NID_zuc_128eea3         1199
+#define OBJ_zuc_128eea3         OBJ_zuc,1L
+
+#define SN_zuc_128eia3          "zuc-128eia3"
+#define NID_zuc_128eia3         1200
+#define OBJ_zuc_128eia3         OBJ_zuc,2L
+

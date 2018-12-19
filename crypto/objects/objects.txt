@@ -1526,6 +1526,11 @@ sm-scheme 104 5         : SM4-CFB1            : sm4-cfb1
 sm-scheme 104 6         : SM4-CFB8            : sm4-cfb8
 sm-scheme 104 7         : SM4-CTR             : sm4-ctr
 
+# ZUC
+sm-scheme 800	: ZUC	: zuc
+zuc 1		: zuc-128eea3
+zuc 2		: zuc-128eia3
+
 # There is no OID that just denotes "HMAC" oddly enough...
 
 			: HMAC				: hmac

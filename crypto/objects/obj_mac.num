@@ -1195,3 +1195,6 @@ hmacWithSHA512_256		1194
 gmac		1195
 kmac128		1196
 kmac256		1197
+zuc		1198
+zuc_128eea3		1199
+zuc_128eia3		1200

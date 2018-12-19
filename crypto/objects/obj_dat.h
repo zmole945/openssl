@@ -10,7 +10,7 @@
  */
 
 /* Serialized OID's */
-static const unsigned char so[7767] = {
+static const unsigned char so[7792] = {
     0x2A,0x86,0x48,0x86,0xF7,0x0D,                 /* [    0] OBJ_rsadsi */
     0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,            /* [    6] OBJ_pkcs */
     0x2A,0x86,0x48,0x86,0xF7,0x0D,0x02,0x02,       /* [   13] OBJ_md2 */
@@ -1077,9 +1077,12 @@ static const unsigned char so[7767] = {
     0x2A,0x86,0x48,0x86,0xF7,0x0D,0x02,0x0C,       /* [ 7745] OBJ_hmacWithSHA512_224 */
     0x2A,0x86,0x48,0x86,0xF7,0x0D,0x02,0x0D,       /* [ 7753] OBJ_hmacWithSHA512_256 */
     0x28,0xCC,0x45,0x03,0x04,                      /* [ 7761] OBJ_gmac */
+    0x2A,0x81,0x1C,0xCF,0x55,0x01,0x86,0x20,       /* [ 7766] OBJ_zuc */
+    0x2A,0x81,0x1C,0xCF,0x55,0x01,0x86,0x20,0x01,  /* [ 7774] OBJ_zuc_128eea3 */
+    0x2A,0x81,0x1C,0xCF,0x55,0x01,0x86,0x20,0x02,  /* [ 7783] OBJ_zuc_128eia3 */
 };
 
-#define NUM_NID 1198
+#define NUM_NID 1201
 static const ASN1_OBJECT nid_objs[NUM_NID] = {
     {"UNDEF", "undefined", NID_undef},
     {"rsadsi", "RSA Data Security, Inc.", NID_rsadsi, 6, &so[0]},
@@ -2279,9 +2282,12 @@ static const ASN1_OBJECT nid_objs[NUM_NID] = {
     {"GMAC", "gmac", NID_gmac, 5, &so[7761]},
     {"KMAC128", "kmac128", NID_kmac128},
     {"KMAC256", "kmac256", NID_kmac256},
+    {"ZUC", "zuc", NID_zuc, 8, &so[7766]},
+    {"zuc-128eea3", "zuc-128eea3", NID_zuc_128eea3, 9, &so[7774]},
+    {"zuc-128eia3", "zuc-128eia3", NID_zuc_128eia3, 9, &so[7782]},
 };
 
-#define NUM_SN 1189
+#define NUM_SN 1192
 static const unsigned int sn_objs[NUM_SN] = {
      364,    /* "AD_DVCS" */
      419,    /* "AES-128-CBC" */
@@ -3472,9 +3478,12 @@ static const unsigned int sn_objs[NUM_SN] = {
      158,    /* "x509Certificate" */
      160,    /* "x509Crl" */
     1093,    /* "x509ExtAdmission" */
+    1200,    /* OBJ_zuc                          1 2 156 10197 1 800 */
+    1201,    /* "zuc-128eea3" */
+    1202,    /* "zuc-128eia3" */
 };
 
-#define NUM_LN 1189
+#define NUM_LN 1192
 static const unsigned int ln_objs[NUM_LN] = {
      363,    /* "AD Time Stamping" */
      405,    /* "ANSI X9.62" */
@@ -4665,9 +4674,12 @@ static const unsigned int ln_objs[NUM_LN] = {
      158,    /* "x509Certificate" */
      160,    /* "x509Crl" */
      125,    /* "zlib compression" */
+    1200,    /* "zuc" */
+    1201,    /* "zuc-128eea3" */
+    1202,    /* "zuc-128eia3" */
 };
 
-#define NUM_OBJ 1072
+#define NUM_OBJ 1192
 static const unsigned int obj_objs[NUM_OBJ] = {
        0,    /* OBJ_undef                        0 */
      181,    /* OBJ_iso                          1 */
